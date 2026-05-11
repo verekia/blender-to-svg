@@ -257,6 +257,42 @@ def chain_segments(segments):
     return loops, is_clean
 
 
+def classify_flat_edges(kept_edges, decimals=1):
+    """Bucket each kept edge by (material, rounded-2D-key) and classify.
+
+    Per CLAUDE.md's flat-mode table:
+      singleton entry             → outline (caller treats as part of perimeter)
+      ≥2 entries, all same `ei`   → interior crease (overlay <line>)
+      ≥2 entries, mixed `ei`      → cancelled (visually coincident, drop)
+
+    Args:
+        kept_edges: iterable of (poly_idx, mesh_edge_idx, material_idx,
+            point_a, point_b). Points are (x, y) tuples in screen space.
+        decimals: rounding precision for the 2D key (1 = 0.1 user units; see
+            CLAUDE.md "Coincident-face dedup" for why 0.1).
+
+    Returns:
+        (interior_edges, cancelled_edges), each a set of (poly_idx, mesh_edge_idx).
+    """
+    mat_edge_map = defaultdict(list)
+    for poly_idx, mesh_edge_idx, mat, pa, pb in kept_edges:
+        ka = (round(pa[0], decimals), round(pa[1], decimals))
+        kb = (round(pb[0], decimals), round(pb[1], decimals))
+        if ka == kb:
+            continue
+        mat_edge_map[(mat, frozenset([ka, kb]))].append((poly_idx, mesh_edge_idx))
+    interior = set()
+    cancelled = set()
+    for entries in mat_edge_map.values():
+        if len(entries) < 2:
+            continue
+        if len({e[1] for e in entries}) == 1:
+            interior.update(entries)
+        else:
+            cancelled.update(entries)
+    return interior, cancelled
+
+
 def find_camera(scene):
     if scene.camera is not None:
         return scene.camera
@@ -380,22 +416,13 @@ def main():
         paths_out = []
         edges_out = []
 
-        # Classify each kept edge in flat mode by inspecting the (material,
-        # 2D-key) buckets:
-        # - singleton entry  → outline edge of the merged region
-        # - multi same `ei`  → interior crease (shared 3D mesh edge between two
-        #   visible same-material faces); drawn as an overlay line, not as part
-        #   of the closed outline.
-        # - multi mixed `ei` → seam (e.g. solidify-boundary or joined sub-mesh
-        #   silhouettes that meet visually); cancelled — not drawn at all.
-        cancelled_edges = set()
         interior_edges = set()
+        cancelled_edges = set()
+        kept_edges_data = []
         if shading_mode == "flat":
-            mat_edge_map = defaultdict(list)
             for poly in mesh.polygons:
                 if not poly_visible[poly.index]:
                     continue
-                mat = poly.material_index
                 for k in range(poly.loop_total):
                     li = poly.loop_start + k
                     ei = mesh.loops[li].edge_index
@@ -403,20 +430,12 @@ def main():
                         continue
                     va = poly.vertices[k]
                     vb = poly.vertices[(k + 1) % poly.loop_total]
-                    ka = (round(screen_verts[va][0], 1), round(screen_verts[va][1], 1))
-                    kb = (round(screen_verts[vb][0], 1), round(screen_verts[vb][1], 1))
-                    if ka == kb:
-                        continue
-                    mat_edge_map[(mat, frozenset([ka, kb]))].append((poly.index, ei))
-            for entries in mat_edge_map.values():
-                if len(entries) < 2:
-                    continue
-                if len(set(e[1] for e in entries)) == 1:
-                    for poly_idx, mesh_edge_idx in entries:
-                        interior_edges.add((poly_idx, mesh_edge_idx))
-                else:
-                    for poly_idx, mesh_edge_idx in entries:
-                        cancelled_edges.add((poly_idx, mesh_edge_idx))
+                    pa = (screen_verts[va][0], screen_verts[va][1])
+                    pb = (screen_verts[vb][0], screen_verts[vb][1])
+                    kept_edges_data.append(
+                        (poly.index, ei, poly.material_index, pa, pb)
+                    )
+            interior_edges, cancelled_edges = classify_flat_edges(kept_edges_data)
 
         if shading_mode == "flat":
             parent = list(range(len(mesh.polygons)))
@@ -490,6 +509,15 @@ def main():
                     if len(region) < 3:
                         continue
                     polys_out.append((depth, region, fill, True))
+
+            seen_ei = set()
+            for poly_idx, ei, _mat, pa, pb in kept_edges_data:
+                if (poly_idx, ei) not in interior_edges:
+                    continue
+                if ei in seen_ei:
+                    continue
+                seen_ei.add(ei)
+                edges_out.append((pa, pb))
         else:
             for poly in mesh.polygons:
                 if not poly_visible[poly.index]:

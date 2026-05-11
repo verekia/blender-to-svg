@@ -280,6 +280,94 @@ def _():
     assert_eq(len(loops[0]), 4)
 
 
+# --- classify_flat_edges ---
+
+@test("classify_flat_edges: empty input -> empty sets")
+def _():
+    interior, cancelled = bts.classify_flat_edges([])
+    assert_eq(interior, set())
+    assert_eq(cancelled, set())
+
+
+@test("classify_flat_edges: singleton bucket is outline (no interior, no cancelled)")
+def _():
+    # one polygon owns this edge — boundary, not a crease
+    kept = [(0, 5, 0, (10.0, 0.0), (20.0, 0.0))]
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, set())
+    assert_eq(cancelled, set())
+
+
+@test("classify_flat_edges: two same-material polys sharing one mesh edge -> interior crease")
+def _():
+    # Regression for the dropped-crease bug. Two same-material polys, same mesh
+    # edge index 5, coincident 2D segment. Direction reversed on poly 1
+    # (manifold-neighbour winding) — must still bucket together.
+    kept = [
+        (0, 5, 0, (10.0, 0.0), (20.0, 0.0)),
+        (1, 5, 0, (20.0, 0.0), (10.0, 0.0)),
+    ]
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, {(0, 5), (1, 5)})
+    assert_eq(cancelled, set())
+
+
+@test("classify_flat_edges: coincident edges from different mesh edges -> cancelled")
+def _():
+    # e.g. solidify inner+outer shell silhouettes projecting to the same screen edge
+    kept = [
+        (0, 5, 0, (10.0, 0.0), (20.0, 0.0)),
+        (1, 7, 0, (10.0, 0.0), (20.0, 0.0)),
+    ]
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, set())
+    assert_eq(cancelled, {(0, 5), (1, 7)})
+
+
+@test("classify_flat_edges: same mesh edge across two materials -> both outlines")
+def _():
+    # Each material's bucket is a singleton -> outline on both sides, no overlay.
+    kept = [
+        (0, 5, 0, (10.0, 0.0), (20.0, 0.0)),
+        (1, 5, 1, (20.0, 0.0), (10.0, 0.0)),
+    ]
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, set())
+    assert_eq(cancelled, set())
+
+
+@test("classify_flat_edges: 0.1 rounding tolerates near-coincident positions")
+def _():
+    # Solidify shells were ~0.03 user units apart on megaxe; round(_, 1) catches them.
+    kept = [
+        (0, 5, 0, (10.00, 0.00), (20.00, 0.00)),
+        (1, 5, 0, (20.03, 0.02), (10.01, 0.01)),
+    ]
+    interior, _c = bts.classify_flat_edges(kept)
+    assert_eq(interior, {(0, 5), (1, 5)})
+
+
+@test("classify_flat_edges: zero-length edge (collapsed by rounding) is dropped")
+def _():
+    kept = [(0, 5, 0, (10.0, 0.0), (10.04, 0.04))]  # both ends round to same key
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, set())
+    assert_eq(cancelled, set())
+
+
+@test("classify_flat_edges: three polys, only the shared diagonal is interior")
+def _():
+    # Two triangles sharing diagonal edge 5; a third unrelated triangle on edge 9.
+    kept = [
+        (0, 5, 0, (0.0, 0.0), (10.0, 10.0)),
+        (1, 5, 0, (10.0, 10.0), (0.0, 0.0)),
+        (2, 9, 0, (50.0, 50.0), (60.0, 60.0)),
+    ]
+    interior, cancelled = bts.classify_flat_edges(kept)
+    assert_eq(interior, {(0, 5), (1, 5)})
+    assert_eq(cancelled, set())
+
+
 # --- parse_args ---
 
 @test("parse_args: defaults when only `--` separator is present")
