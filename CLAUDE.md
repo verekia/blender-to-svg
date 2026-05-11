@@ -34,12 +34,14 @@ The entry point is `blender_to_svg.sh` which runs Blender headlessly with
    - **Screen-space dedup** of polygons (see "Dedup" below).
    - Classify each visible polygon's edges (boundary / silhouette /
      crease) and store in `edge_kept`.
-   - In `flat` mode, union-find polygons connected via *non-kept* edges
-     into components, then either emit one `<path>` per multi-poly
-     component (if chaining succeeds) or fall back to per-polygon.
+   - In `flat` mode, union-find every visible same-material polygon
+     into one component per material, merge their 2D perimeters with
+     `polygon_union_2d`, emit one `<polygon>` per merged region.
    - In `lambert` mode, emit per-polygon directly.
 4. Sort meshes by their average polygon depth (painter's algorithm at
    mesh level) and emit polygons-then-edges per mesh group.
+5. Strip collinear vertices from each `<polygon>` right before
+   serialisation (see "Collinear-vertex cleanup" below).
 
 ## Per-mesh batching (not per-polygon)
 
@@ -102,77 +104,100 @@ It is necessary and load-bearing — don't remove it.
 In `flat` mode, all visible same-material polygons within a mesh merge
 into one component — the user expects one editable shape per coloured
 region. Creases between those polys are still drawn, but as separate
-overlay lines on top of the merged shape, not as part of the closed
-outline.
+overlay `<line>` elements on top of the merged shape, not as part of
+the closed outline.
 
-Union-find runs on visible polygons with two criteria:
+Union-find runs on visible polygons with two passes:
 
-1. **3D-adjacent same-material** (any edge, kept or non-kept). This is
-   the change from the original "non-kept edges only" rule — it lets
-   adjacent faces with a sharp 3D crease still belong to the same
-   single SVG shape.
-2. **2D-coincident kept edge from different 3D mesh edges**: same as
-   before — handles solidify-boundary silhouettes and joined-sub-mesh
-   seams meeting visually.
+1. **3D-adjacent same-material**: any shared mesh edge between two
+   visible same-material faces unions them.
+2. **Same-material forced**: every visible same-material polygon in
+   the mesh is unioned to the first such polygon for that material,
+   so visually-disconnected sub-meshes of the same colour end up in
+   one component even without a 3D edge between them.
 
-Each kept edge in flat mode is then classified by looking at its
-`(material, rounded-2D-key)` bucket:
+Each kept edge in flat mode is also classified by `classify_flat_edges`
+into `(material, rounded-2D-key)` buckets:
 
-| bucket population              | category    | rendered as                              |
-| ------------------------------ | ----------- | ---------------------------------------- |
-| singleton                      | outline     | part of the chained closed path          |
-| ≥ 2 entries, all same `ei`     | interior    | overlay `<line>` on top of the path      |
-| ≥ 2 entries, mixed `ei`        | cancelled   | not drawn at all                         |
+| bucket population              | category    |
+| ------------------------------ | ----------- |
+| singleton                      | outline     |
+| ≥ 2 entries, all same `ei`     | interior    |
+| ≥ 2 entries, mixed `ei`        | cancelled   |
 
 `ei` is the mesh edge index — same `ei` across multiple entries means
 the same 3D edge shared by adjacent faces (a true crease); mixed `ei`
-means two distinct mesh edges that happen to project to the same 2D line
-(a visual seam between separate sub-meshes).
+means two distinct mesh edges that happen to project to the same 2D line.
 
-Outline edges feed `chain_segments` to build one closed `<path>` per
-component. Interior crease edges are deduped by `ei` (each shared
-mesh edge appears in two polys' kept sets) and pushed to `edges_out`
-so they emit as `<line>` elements after the path. Cancelled edges drop
-out.
+Of these, **only the `interior` set is currently consumed**: each
+interior edge is deduped by `ei` and emitted as a `<line>` overlay
+on top of the merged shapes. The `cancelled` set is computed but
+unused. (The classification was load-bearing in the older
+chain-based emission; see "Dead code" below.)
 
-For size-1 components and lambert mode we keep the older "polygon with
-its own black stroke" or "polygon + per-edge `<line>`" emission.
+### Per-component 2D polygon merging (`polygon_union_2d`)
 
-### `chain_segments` uses 2D position IDs, not mesh vertex indices
+For each component, `polygon_union_2d` iteratively merges every
+visible same-material face's 2D perimeter along shared edges and
+returns one or more closed polygons (one per visually-connected
+region). Each result is emitted as a single `<polygon>` with black
+stroke — the polygon stroke *is* the outline. There are no `<path>`
+elements in current output.
 
-This matters specifically for the 2D-coincident-seam case: poly A and
-poly B may have the *same* 2D corner point but *different* mesh vertex
-indices there (separate sub-meshes, joined object). If chain_segments
-used mesh indices for connectivity, the chain couldn't walk across the
-seam. So we intern rounded 2D positions into integer IDs locally per
-component and feed those to chain_segments instead.
+`_try_merge_polys` does the per-pair stitch: it finds a shared edge,
+then extends the shared boundary in *both directions* as long as the
+two perimeters keep matching. This matters because a new polygon often
+meets the already-merged result along a *run* of consecutive edges
+(typical when merging a quad grid row-by-row). Stopping at one edge
+would leave the rest of the shared run as a self-touching slit in the
+perimeter, which then strokes as a spurious interior line.
 
-### Why chain_segments has a clean/dirty return
+The match tolerance passed in is `max(width, height) / 4000` — tight
+enough not to fuse unrelated nearby edges, loose enough to absorb
+floating-point noise from `world_to_camera_view`.
 
-`chain_segments` walks edges and stitches them into closed cycles by
-picking the first unused incident segment at each vertex. For a clean
-manifold component (every vertex has degree 2 in the kept-edge graph),
-this produces one closed loop per outline component. Perfect.
+## Collinear-vertex cleanup
 
-When it can't close — dedup orphaned an edge, the topology has a
-T-junction, or cancellation removed an edge that didn't have a clean
-counterpart — the function returns `is_clean = False`. The caller throws
-away the chain output and falls back to a **compact two-path emission**:
+Right before each `<polygon>` is serialised, `remove_collinear_points`
+strips any vertex whose perpendicular distance to the line through its
+two neighbors is under 0.05 user units (well below the `.2f`
+serialisation rounding), and collapses coincident neighbors. It
+iterates to a fixed point so a run of N collinear vertices fully
+collapses to its two endpoints.
 
-- One `<path>` whose `d` lists every polygon in the component as a
-  Z-closed subpath, painted with `fill="X" stroke="X" stroke-width="0.6"`
-  for seam masking.
-- One `<path>` whose `d` lists every non-cancelled kept edge as an
-  unclosed `M…L…` subpath, painted with `fill="none" stroke="#000"
-  stroke-width="{sw}"`.
+This is where most of the size wins come from in flat mode: merged
+perimeters from `polygon_union_2d` typically retain a vertex at every
+original face corner along a straight edge, and the cleanup removes
+them. Polygons that collapse below 3 unique vertices are dropped
+entirely.
 
-So a 30-polygon failing component costs 2 SVG elements, not 30+30.
-Visually identical to per-polygon emission, drastically smaller files.
-This was the fix that took `megaxe.blend` from ~22 KB / 200 elements down
-to ~14 KB / 80 elements.
+If you tighten the tolerance, watch out for almost-straight curves
+(spheres) where each face's corner is meaningfully off-line by a small
+amount; over-aggressive cleanup will visibly flatten them.
 
-The sphere case still hits the fast single-path branch; only the
-pathologically-topologied components hit this fallback.
+## No background rect
+
+The SVG output starts with the mesh elements directly after the `<svg>`
+open tag — there's no `<rect width=… height=… fill="#ffffff"/>`.
+Output composites transparently over whatever surface displays it.
+Don't re-add a background rect without an explicit user request.
+
+## Dead code
+
+A few things in `blender_to_svg.py` exist but aren't reached on any
+current code path:
+
+- `chain_segments` — the older outline-stitching function. Superseded
+  by `polygon_union_2d`. Still defined; not called.
+- `paths_out` — the per-mesh `<path>` accumulator. Initialised to `[]`
+  and threaded through `mesh_groups` and the serialisation loop, but
+  nothing ever appends to it. The `kind == "path"` branch of the emit
+  loop is therefore unreachable.
+- `cancelled_edges` — returned by `classify_flat_edges` and unpacked,
+  but never read.
+
+Leave these alone unless you're consciously cleaning up — re-deriving
+them would be expensive if a future emission strategy wants them back.
 
 ## Why 0.6 px same-colour stroke on polygons
 
@@ -243,11 +268,14 @@ clamping until the final cap at 1.0 per channel.
 
 The two scenes that catch most issues:
 
-- **`simple.blend`** — sphere + two wedges. Tests the chain-segment
-  fast path, flat-mode merging, multi-material rendering, and the
-  sphere-apex silhouette case.
+- **`simple.blend`** — sphere + two wedges. Tests `polygon_union_2d`
+  on a smooth curved component (sphere) and on flat-faced wedges,
+  multi-material rendering, the sphere-apex silhouette case, and how
+  conservative `remove_collinear_points` is on near-collinear sphere
+  edges.
 - **`megaxe.blend`** — multi-material single-object mesh with
-  near-coincident faces. Tests dedup and the chain_segments fallback.
+  near-coincident faces. Tests dedup and 2D merging where the source
+  topology is messy.
 
 Spot-check rasterisation:
 

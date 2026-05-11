@@ -4,10 +4,13 @@ Export a Blender scene to an SVG that looks like the scene as seen through its
 active camera — flat-shaded or Lambert-shaded vector art rather than a raster
 render.
 
-Each visible polygon becomes an SVG `<polygon>` (or part of a `<path>`).
-Faces are backface-culled, painter's-sorted by depth, and stroked with their
-edges. The result is a self-contained, editable SVG that opens cleanly in
-Inkscape, Illustrator, browsers, or any other vector tool.
+Each visible polygon becomes an SVG `<polygon>`, plus `<line>` elements for
+interior creases. Faces are backface-culled, painter's-sorted by depth, and
+stroked with their edges. The result is a self-contained, editable SVG that
+opens cleanly in Inkscape, Illustrator, browsers, or any other vector tool.
+
+The SVG has **no background rect** — it composites transparently onto
+whatever you place it over.
 
 ## Requirements
 
@@ -97,15 +100,18 @@ colour is converted from linear to sRGB before being written as `#rrggbb`.
   the wrong sequence between meshes.
 - **No partial near-plane clipping.** A polygon with *any* vertex behind the
   camera is dropped entirely rather than clipped against the near plane.
-- **Flat-mode component merging** requires the visible region of a single
-  material to have a topologically clean outline. When the topology is
-  pathological (open chains from coincident-face dedup, T-junctions,
-  non-manifold edges), that component falls back to per-polygon emission —
-  still correct, just larger SVG.
+- **Flat-mode component merging** unions every visible same-material face
+  inside a mesh into one shape via 2D polygon merging (`polygon_union_2d`).
+  Visually-disconnected regions of the same material stay split into separate
+  `<polygon>` elements rather than being combined into one `<path>`.
 - **Coincident face dedup** runs at a 0.1 user-unit screen tolerance. Two
   visible polygons whose rounded 2D vertex sets match are treated as
   duplicates, keeping the closest. Densely-tiled small polygons (tinier than
   ~0.1 user units across) could be over-merged.
+- **Collinear-vertex cleanup** runs on every emitted `<polygon>`: any vertex
+  whose perpendicular distance to the line through its neighbors is below
+  0.05 user units is dropped. This trims away the mid-edge stops that
+  flat-mode 2D merging leaves behind on straight runs.
 
 ## Files
 
