@@ -99,19 +99,53 @@ It is necessary and load-bearing — don't remove it.
 
 ## Flat-mode component merging
 
-In `flat` mode, all polygons of the same material with no kept edge
-between them have the same final colour and no visible separator —
-they should render as a single shape. We use union-find on visible
-polygons within each mesh, unioning by shared non-kept edges of the same
-material index.
+In `flat` mode, all visible same-material polygons within a mesh merge
+into one component — the user expects one editable shape per coloured
+region. Creases between those polys are still drawn, but as separate
+overlay lines on top of the merged shape, not as part of the closed
+outline.
 
-For each component with size > 1 we collect its kept edges (the
-component's boundary), chain them into closed loops via
-`chain_segments`, and emit one `<path>` with `fill-rule="evenodd"` and a
-black stroke.
+Union-find runs on visible polygons with two criteria:
 
-For size-1 components and lambert mode, we keep the older "polygon with
+1. **3D-adjacent same-material** (any edge, kept or non-kept). This is
+   the change from the original "non-kept edges only" rule — it lets
+   adjacent faces with a sharp 3D crease still belong to the same
+   single SVG shape.
+2. **2D-coincident kept edge from different 3D mesh edges**: same as
+   before — handles solidify-boundary silhouettes and joined-sub-mesh
+   seams meeting visually.
+
+Each kept edge in flat mode is then classified by looking at its
+`(material, rounded-2D-key)` bucket:
+
+| bucket population              | category    | rendered as                              |
+| ------------------------------ | ----------- | ---------------------------------------- |
+| singleton                      | outline     | part of the chained closed path          |
+| ≥ 2 entries, all same `ei`     | interior    | overlay `<line>` on top of the path      |
+| ≥ 2 entries, mixed `ei`        | cancelled   | not drawn at all                         |
+
+`ei` is the mesh edge index — same `ei` across multiple entries means
+the same 3D edge shared by adjacent faces (a true crease); mixed `ei`
+means two distinct mesh edges that happen to project to the same 2D line
+(a visual seam between separate sub-meshes).
+
+Outline edges feed `chain_segments` to build one closed `<path>` per
+component. Interior crease edges are deduped by `ei` (each shared
+mesh edge appears in two polys' kept sets) and pushed to `edges_out`
+so they emit as `<line>` elements after the path. Cancelled edges drop
+out.
+
+For size-1 components and lambert mode we keep the older "polygon with
 its own black stroke" or "polygon + per-edge `<line>`" emission.
+
+### `chain_segments` uses 2D position IDs, not mesh vertex indices
+
+This matters specifically for the 2D-coincident-seam case: poly A and
+poly B may have the *same* 2D corner point but *different* mesh vertex
+indices there (separate sub-meshes, joined object). If chain_segments
+used mesh indices for connectivity, the chain couldn't walk across the
+seam. So we intern rounded 2D positions into integer IDs locally per
+component and feed those to chain_segments instead.
 
 ### Why chain_segments has a clean/dirty return
 
@@ -120,24 +154,25 @@ picking the first unused incident segment at each vertex. For a clean
 manifold component (every vertex has degree 2 in the kept-edge graph),
 this produces one closed loop per outline component. Perfect.
 
-But the dedup can orphan an edge: imagine the top edge of the megaxe's
-binding is owned by a polygon that got deduped. The corner vertices end
-up with degree 1 — open ends — because the connecting edge is gone from
-every visible component's kept-edge set. `chain_segments` then closes
-those open chains with a straight `Z` back to the start, drawing a
-diagonal across the polygon interior. That was *the* bug in the megaxe
-output.
+When it can't close — dedup orphaned an edge, the topology has a
+T-junction, or cancellation removed an edge that didn't have a clean
+counterpart — the function returns `is_clean = False`. The caller throws
+away the chain output and falls back to a **compact two-path emission**:
 
-The fix: `chain_segments` returns `(loops, is_clean)`. `is_clean` flips
-to `False` the moment a chain dead-ends. When it does, we throw away the
-chain output and fall back to per-polygon emission for that component:
-each polygon as `<polygon fill=X stroke=X stroke-width=0.6/>` (the
-same-colour stroke masks anti-aliasing seams between same-colour faces),
-plus its component's kept edges as separate `<line>` elements.
+- One `<path>` whose `d` lists every polygon in the component as a
+  Z-closed subpath, painted with `fill="X" stroke="X" stroke-width="0.6"`
+  for seam masking.
+- One `<path>` whose `d` lists every non-cancelled kept edge as an
+  unclosed `M…L…` subpath, painted with `fill="none" stroke="#000"
+  stroke-width="{sw}"`.
 
-The fallback path produces a larger SVG (no merging optimization) but
-is correct. The sphere case still hits the fast path; only the
-pathologically-topologied components fall back.
+So a 30-polygon failing component costs 2 SVG elements, not 30+30.
+Visually identical to per-polygon emission, drastically smaller files.
+This was the fix that took `megaxe.blend` from ~22 KB / 200 elements down
+to ~14 KB / 80 elements.
+
+The sphere case still hits the fast single-path branch; only the
+pathologically-topologied components hit this fallback.
 
 ## Why 0.6 px same-colour stroke on polygons
 
