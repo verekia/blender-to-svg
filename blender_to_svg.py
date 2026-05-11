@@ -149,19 +149,21 @@ def shade_lambert(normal, base, lights, ambient=0.05):
 
 
 def chain_segments(segments):
-    """Chain undirected segments into closed/open loops of 2D points.
+    """Chain undirected segments into closed loops of 2D points.
 
-    Each segment is (va, vb, pa, pb) where va/vb are integer vertex ids used
-    for connectivity and pa/pb are the corresponding 2D points.
+    Returns (loops, is_clean). is_clean is False if any chain hit a dead end
+    before closing — meaning the input has open ends and the loops shouldn't
+    be filled.
     """
     if not segments:
-        return []
+        return [], True
     incidence = defaultdict(list)
     for i, seg in enumerate(segments):
         incidence[seg[0]].append(i)
         incidence[seg[1]].append(i)
     used = [False] * len(segments)
     loops = []
+    is_clean = True
     for start in range(len(segments)):
         if used[start]:
             continue
@@ -177,6 +179,7 @@ def chain_segments(segments):
                     nxt = s_idx
                     break
             if nxt is None:
+                is_clean = False
                 break
             used[nxt] = True
             sva, svb, spa, spb = segments[nxt]
@@ -189,7 +192,7 @@ def chain_segments(segments):
             loop.append(next_p)
             current_v = next_v
         loops.append(loop)
-    return loops
+    return loops, is_clean
 
 
 def find_camera(scene):
@@ -262,15 +265,31 @@ def main():
 
         poly_visible = [False] * len(mesh.polygons)
         poly_depth = [0.0] * len(mesh.polygons)
+        # Dedup coincident faces (e.g. from solidify modifiers): two polygons that
+        # project to the same 2D outline render to the same pixels, so keep only the
+        # one closest to the camera.
+        seen_screen_keys = {}
         for poly in mesh.polygons:
             if not poly_is_front[poly.index]:
                 continue
             if any(screen_verts[i][2] <= 0.0 for i in poly.vertices):
                 continue
-            poly_visible[poly.index] = True
-            poly_depth[poly.index] = (
-                sum(screen_verts[i][2] for i in poly.vertices) / poly.loop_total
+            pd = sum(screen_verts[i][2] for i in poly.vertices) / poly.loop_total
+            key = frozenset(
+                (round(screen_verts[i][0], 1), round(screen_verts[i][1], 1))
+                for i in poly.vertices
             )
+            existing = seen_screen_keys.get(key)
+            if existing is not None:
+                old_depth, old_idx = existing
+                if pd < old_depth:
+                    poly_visible[old_idx] = False
+                    poly_depth[old_idx] = 0.0
+                else:
+                    continue
+            seen_screen_keys[key] = (pd, poly.index)
+            poly_visible[poly.index] = True
+            poly_depth[poly.index] = pd
 
         edge_kept = {}
         for poly in mesh.polygons:
@@ -375,18 +394,28 @@ def main():
                         pb = (screen_verts[vb][0], screen_verts[vb][1])
                         segments.append((va, vb, pa, pb))
 
-                loops = chain_segments(segments)
-                if not loops:
+                loops, is_clean = chain_segments(segments)
+                if is_clean and loops:
+                    d_parts = []
+                    for loop in loops:
+                        if not loop:
+                            continue
+                        d_parts.append(f"M{loop[0][0]:.2f},{loop[0][1]:.2f}")
+                        for pt in loop[1:]:
+                            d_parts.append(f"L{pt[0]:.2f},{pt[1]:.2f}")
+                        d_parts.append("Z")
+                    paths_out.append((depth, " ".join(d_parts), fill))
                     continue
-                d_parts = []
-                for loop in loops:
-                    if not loop:
-                        continue
-                    d_parts.append(f"M{loop[0][0]:.2f},{loop[0][1]:.2f}")
-                    for pt in loop[1:]:
-                        d_parts.append(f"L{pt[0]:.2f},{pt[1]:.2f}")
-                    d_parts.append("Z")
-                paths_out.append((depth, " ".join(d_parts), fill))
+
+                # Fallback: chaining failed (open chains from orphaned edges, T-junctions,
+                # etc.). Emit each polygon individually with same-fill seam-mask stroke,
+                # plus the component's kept edges as separate lines.
+                for pi in poly_indices:
+                    poly = mesh.polygons[pi]
+                    pts = [(screen_verts[v][0], screen_verts[v][1]) for v in poly.vertices]
+                    polys_out.append((poly_depth[pi], pts, fill, False))
+                for sa, sb, pa, pb in segments:
+                    edges_out.append((pa, pb))
         else:
             for poly in mesh.polygons:
                 if not poly_visible[poly.index]:
