@@ -23,6 +23,11 @@ def parse_args():
                         help="Minimum dihedral angle (degrees) for an interior edge "
                              "to be drawn. 0 = all edges; 180 = outline only; "
                              "e.g. 30 keeps sharp creases but skips smooth surfaces.")
+    parser.add_argument("-s", "--shading", choices=("lambert", "flat"),
+                        default="lambert",
+                        help="Shading mode: 'lambert' (default) shades faces using "
+                             "viewport solid lights; 'flat' uses the raw material "
+                             "color with no shading.")
     return parser.parse_args(argv)
 
 
@@ -136,6 +141,7 @@ def main():
     output_path = args.output
     stroke_width = args.stroke_width
     crease_threshold = math.radians(args.crease_angle)
+    shading_mode = args.shading
 
     scene = bpy.context.scene
     camera = find_camera(scene)
@@ -149,7 +155,7 @@ def main():
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     cam_loc = camera.matrix_world.translation
-    lights = get_viewport_lights(camera)
+    lights = get_viewport_lights(camera) if shading_mode == "lambert" else []
 
     mesh_groups = []
 
@@ -220,8 +226,8 @@ def main():
 
             depth = sum(screen_verts[i][2] for i in verts_idx) / len(verts_idx)
             base = material_base_color(eval_obj, poly)
-            shaded = shade_lambert(n1, base, lights)
-            fill = rgb_to_hex(shaded)
+            color = shade_lambert(n1, base, lights) if shading_mode == "lambert" else base
+            fill = rgb_to_hex(color)
             all_edges_kept = len(kept_edges) == n_loops
             polys_out.append((depth, points, fill, all_edges_kept))
             if not all_edges_kept:
