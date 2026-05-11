@@ -153,31 +153,56 @@ def _pt_eq(a, b, tol):
 
 
 def _try_merge_polys(p1, p2, tol):
-    """Merge two CCW polygons along a shared 2D edge (reverse orientation).
+    """Merge two CCW polygons along their shared 2D boundary.
 
     Returns the merged polygon's vertex list, or None if they don't share an
-    edge within `tol`. Adjacent faces of a manifold mesh share each edge in
-    opposite directions, so 'reverse orientation' covers the normal case;
-    sub-mesh seams with mismatched winding won't merge here and stay split.
+    edge within `tol`. The shared boundary may be a single edge OR a run of
+    consecutive edges — common when a new polygon meets the already-merged
+    result along multiple edges (e.g. row-by-row merging of a quad grid).
+    Stopping at one edge leaves the rest as a self-touching slit in the
+    merged perimeter, which then strokes as a spurious interior line.
     """
     n1, n2 = len(p1), len(p2)
     for a in range(n1):
         a2 = (a + 1) % n1
         for c in range(n2):
             c2 = (c + 1) % n2
-            if _pt_eq(p1[a], p2[c2], tol) and _pt_eq(p1[a2], p2[c], tol):
-                merged = []
-                idx = (a + 1) % n1
-                while True:
-                    merged.append(p1[idx])
-                    if idx == a:
-                        break
-                    idx = (idx + 1) % n1
-                idx = (c + 2) % n2
-                while idx != c:
-                    merged.append(p2[idx])
-                    idx = (idx + 1) % n2
-                return merged
+            if not (_pt_eq(p1[a], p2[c2], tol) and _pt_eq(p1[a2], p2[c], tol)):
+                continue
+            s1_start, s1_end = a, a2
+            s2_start, s2_end = c, c2
+            # Extend forward in p1 (s1_end advances) while p2 backs up (s2_start retreats).
+            while True:
+                next_a = (s1_end + 1) % n1
+                prev_c = (s2_start - 1) % n2
+                if next_a == s1_start or prev_c == s2_end:
+                    break
+                if not _pt_eq(p1[next_a], p2[prev_c], tol):
+                    break
+                s1_end, s2_start = next_a, prev_c
+            # Extend backward in p1 while p2 advances.
+            while True:
+                prev_a = (s1_start - 1) % n1
+                next_c = (s2_end + 1) % n2
+                if prev_a == s1_end or next_c == s2_start:
+                    break
+                if not _pt_eq(p1[prev_a], p2[next_c], tol):
+                    break
+                s1_start, s2_end = prev_a, next_c
+            merged = []
+            idx = (s1_end + 1) % n1
+            while True:
+                merged.append(p1[idx])
+                if idx == s1_start:
+                    break
+                idx = (idx + 1) % n1
+            idx = (s2_end + 1) % n2
+            while True:
+                merged.append(p2[idx])
+                if idx == s2_start:
+                    break
+                idx = (idx + 1) % n2
+            return merged
     return None
 
 

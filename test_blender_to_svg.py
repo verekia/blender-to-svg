@@ -280,6 +280,95 @@ def _():
     assert_eq(len(loops[0]), 4)
 
 
+# --- polygon_union_2d ---
+
+def _has_duplicate_vertices(poly, tol=1e-6):
+    """A clean merged polygon visits each vertex at most once."""
+    for i in range(len(poly)):
+        for j in range(i + 1, len(poly)):
+            if abs(poly[i][0] - poly[j][0]) < tol and abs(poly[i][1] - poly[j][1]) < tol:
+                return True
+    return False
+
+
+@test("polygon_union_2d: empty input")
+def _():
+    assert_eq(bts.polygon_union_2d([]), [])
+
+
+@test("polygon_union_2d: two CCW triangles sharing one edge -> single quad")
+def _():
+    t1 = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)]
+    t2 = [(2.0, 2.0), (0.0, 2.0), (0.0, 0.0)]  # shares edge (0,0)-(2,2) reversed
+    out = bts.polygon_union_2d([t1, t2])
+    assert_eq(len(out), 1)
+    assert_eq(len(out[0]), 4)
+    # all four corners of the unit-ish square must appear
+    corners = {(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)}
+    assert_eq(set(out[0]), corners)
+
+
+@test("polygon_union_2d: two CCW quads sharing one edge -> no duplicates, corners present")
+def _():
+    q1 = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+    q2 = [(2.0, 0.0), (4.0, 0.0), (4.0, 2.0), (2.0, 2.0)]  # right neighbour
+    out = bts.polygon_union_2d([q1, q2])
+    assert_eq(len(out), 1)
+    assert_eq(_has_duplicate_vertices(out[0]), False)
+    # The four outer corners must be present. Collinear vertices at the shared-
+    # edge endpoints (2,0) and (2,2) may also remain — we don't collapse those.
+    for v in [(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)]:
+        assert_in(v, out[0])
+
+
+@test("polygon_union_2d: two CCW polys sharing TWO consecutive edges -> no slit")
+def _():
+    # Regression for the sphere/axe spurious-interior-line bug. p2 wraps around
+    # p1's bottom-right corner, sharing both the bottom and right edges of p1.
+    # The greedy single-edge merge used to leave one of those edges as a
+    # self-touching slit (duplicate vertex), which strokes as a visible line.
+    p1 = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+    p2 = [(2.0, 2.0), (2.0, 0.0), (0.0, 0.0), (3.0, -1.0)]
+    out = bts.polygon_union_2d([p1, p2])
+    assert_eq(len(out), 1)
+    assert_eq(_has_duplicate_vertices(out[0]), False, "merged perimeter must not self-touch")
+    # Shared corners (2,0) and (2,2) collapse — only (0,0) and (2,2) remain as
+    # the boundary between the shared run and the rest. Result is a quad.
+    assert_eq(set(out[0]),
+              {(0.0, 2.0), (0.0, 0.0), (3.0, -1.0), (2.0, 2.0)})
+
+
+@test("polygon_union_2d: 2x2 quad grid merges to a single component, no interior vertex")
+def _():
+    # Direct simulation of the sphere/axe failure case: row-by-row merging.
+    # After merging the top two quads, the bottom-right quad shares two
+    # consecutive edges with the running result. Pre-fix, that left a slit
+    # in the perimeter that stroked as a visible interior cross.
+    a = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]  # bottom-left
+    b = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)]  # bottom-right
+    c = [(0.0, 1.0), (1.0, 1.0), (1.0, 2.0), (0.0, 2.0)]  # top-left
+    d = [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (1.0, 2.0)]  # top-right
+    out = bts.polygon_union_2d([a, b, c, d])
+    assert_eq(len(out), 1)
+    assert_eq(_has_duplicate_vertices(out[0]), False)
+    # Outer corners must be on the perimeter. Edge-midpoint vertices (e.g.
+    # (1,0)) are collinear-but-present, which is fine — they don't render as
+    # interior lines.
+    for v in [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]:
+        assert_in(v, out[0])
+    # Critical: the interior grid vertex (1,1) must NOT leak into the perimeter.
+    # If it did, the algorithm would have drawn a slit through the middle.
+    assert_eq((1.0, 1.0) in set(out[0]), False, "interior grid vertex leaked")
+
+
+@test("polygon_union_2d: disjoint polys stay separate")
+def _():
+    p1 = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    p2 = [(10.0, 10.0), (11.0, 10.0), (11.0, 11.0), (10.0, 11.0)]
+    out = bts.polygon_union_2d([p1, p2])
+    assert_eq(len(out), 2)
+
+
 # --- classify_flat_edges ---
 
 @test("classify_flat_edges: empty input -> empty sets")
