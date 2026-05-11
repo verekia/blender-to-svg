@@ -576,7 +576,6 @@ def main():
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'width="{width}" height="{height}">',
-        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
     ]
     sw = f"{stroke_width:g}"
     for _, polys_out, paths_out, edges_out in mesh_groups:
