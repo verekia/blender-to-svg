@@ -222,8 +222,10 @@ def main():
             base = material_base_color(eval_obj, poly)
             shaded = shade_lambert(n1, base, lights)
             fill = rgb_to_hex(shaded)
-            polys_out.append((depth, points, fill))
-            edges_out.extend(kept_edges)
+            all_edges_kept = len(kept_edges) == n_loops
+            polys_out.append((depth, points, fill, all_edges_kept))
+            if not all_edges_kept:
+                edges_out.extend(kept_edges)
 
         eval_obj.to_mesh_clear()
 
@@ -240,12 +242,18 @@ def main():
     ]
     sw = f"{stroke_width:g}"
     for _, polys_out, edges_out in mesh_groups:
-        for _, points, fill in sorted(polys_out, key=lambda p: -p[0]):
+        for _, points, fill, all_edges_kept in sorted(polys_out, key=lambda p: -p[0]):
             pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-            parts.append(
-                f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
-                f'stroke-width="0.6" stroke-linejoin="round"/>'
-            )
+            if all_edges_kept:
+                parts.append(
+                    f'<polygon points="{pts}" fill="{fill}" stroke="#000000" '
+                    f'stroke-width="{sw}" stroke-linejoin="round"/>'
+                )
+            else:
+                parts.append(
+                    f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
+                    f'stroke-width="0.6" stroke-linejoin="round"/>'
+                )
         for (x1, y1), (x2, y2) in edges_out:
             parts.append(
                 f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
