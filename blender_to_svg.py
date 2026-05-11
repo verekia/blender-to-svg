@@ -151,7 +151,7 @@ def main():
     cam_loc = camera.matrix_world.translation
     lights = get_viewport_lights(camera)
 
-    faces = []
+    mesh_groups = []
 
     for obj in scene.objects:
         if obj.type != 'MESH':
@@ -185,6 +185,8 @@ def main():
                 ei = mesh.loops[li].edge_index
                 edge_to_polys[ei].append(p.index)
 
+        polys_out = []
+        edges_out = []
         for poly in mesh.polygons:
             if not poly_is_front[poly.index]:
                 continue
@@ -220,11 +222,16 @@ def main():
             base = material_base_color(eval_obj, poly)
             shaded = shade_lambert(n1, base, lights)
             fill = rgb_to_hex(shaded)
-            faces.append((depth, points, fill, kept_edges))
+            polys_out.append((depth, points, fill))
+            edges_out.extend(kept_edges)
 
         eval_obj.to_mesh_clear()
 
-    faces.sort(key=lambda f: -f[0])
+        if polys_out:
+            mesh_depth = sum(p[0] for p in polys_out) / len(polys_out)
+            mesh_groups.append((mesh_depth, polys_out, edges_out))
+
+    mesh_groups.sort(key=lambda g: -g[0])
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
@@ -232,13 +239,14 @@ def main():
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
     ]
     sw = f"{stroke_width:g}"
-    for _, points, fill, kept_edges in faces:
-        pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-        parts.append(
-            f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
-            f'stroke-width="0.6"/>'
-        )
-        for (x1, y1), (x2, y2) in kept_edges:
+    for _, polys_out, edges_out in mesh_groups:
+        for _, points, fill in sorted(polys_out, key=lambda p: -p[0]):
+            pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+            parts.append(
+                f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
+                f'stroke-width="0.6" stroke-linejoin="round"/>'
+            )
+        for (x1, y1), (x2, y2) in edges_out:
             parts.append(
                 f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
                 f'stroke="#000000" stroke-width="{sw}" stroke-linecap="round"/>'
