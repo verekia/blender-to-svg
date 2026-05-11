@@ -235,6 +235,42 @@ def polygon_union_2d(polys, tol=0.5):
     return [p for p in result if p is not None]
 
 
+def remove_collinear_points(points, tol=0.05):
+    """Drop vertices that lie on the segment between their two neighbors.
+
+    Operates in screen-space user units. A vertex is removed when its
+    perpendicular distance to the line through its neighbors is below `tol`,
+    or when it coincides with a neighbor. Iterates to a fixed point so runs
+    of consecutive collinear vertices collapse fully.
+    """
+    if len(points) < 3:
+        return list(points)
+    result = list(points)
+    changed = True
+    while changed and len(result) >= 3:
+        changed = False
+        i = 0
+        while i < len(result) and len(result) >= 3:
+            a = result[i - 1]
+            p = result[i]
+            b = result[(i + 1) % len(result)]
+            abx, aby = b[0] - a[0], b[1] - a[1]
+            ab_len = math.hypot(abx, aby)
+            if ab_len < tol:
+                if math.hypot(p[0] - a[0], p[1] - a[1]) < tol:
+                    result.pop(i)
+                    changed = True
+                    continue
+            else:
+                cross = abx * (p[1] - a[1]) - aby * (p[0] - a[0])
+                if abs(cross) / ab_len < tol:
+                    result.pop(i)
+                    changed = True
+                    continue
+            i += 1
+    return result
+
+
 def chain_segments(segments):
     """Chain undirected segments into closed loops of 2D points.
 
@@ -585,7 +621,10 @@ def main():
         )
         for kind, _, payload, fill, flag in sorted(shapes, key=lambda s: -s[1]):
             if kind == "poly":
-                pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in payload)
+                cleaned = remove_collinear_points(payload)
+                if len(cleaned) < 3:
+                    continue
+                pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in cleaned)
                 if flag:  # all_edges_kept
                     parts.append(
                         f'<polygon points="{pts}" fill="{fill}" stroke="#000000" '
