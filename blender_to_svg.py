@@ -70,6 +70,27 @@ def material_base_color(obj, poly):
     return (c[0], c[1], c[2])
 
 
+def get_sun_lights(scene):
+    """Return list of (world_direction_toward_light, color_rgb) for SUN lights.
+
+    A sun's shining direction is its local -Z in world space; the direction
+    from a surface toward the sun is the opposite (the light's world +Z axis).
+    """
+    lights = []
+    for obj in scene.objects:
+        if obj.type != 'LIGHT' or obj.data is None:
+            continue
+        if obj.data.type != 'SUN':
+            continue
+        if not obj.visible_get():
+            continue
+        d_world = (obj.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()
+        col = obj.data.color
+        energy = float(getattr(obj.data, "energy", 1.0))
+        lights.append((d_world, Vector((col[0] * energy, col[1] * energy, col[2] * energy))))
+    return lights
+
+
 def get_viewport_lights(camera):
     """Return list of (world_direction_toward_light, diffuse_color_rgb).
 
@@ -127,6 +148,50 @@ def shade_lambert(normal, base, lights, ambient=0.05):
     return (min(R, 1.0), min(G, 1.0), min(B, 1.0))
 
 
+def chain_segments(segments):
+    """Chain undirected segments into closed/open loops of 2D points.
+
+    Each segment is (va, vb, pa, pb) where va/vb are integer vertex ids used
+    for connectivity and pa/pb are the corresponding 2D points.
+    """
+    if not segments:
+        return []
+    incidence = defaultdict(list)
+    for i, seg in enumerate(segments):
+        incidence[seg[0]].append(i)
+        incidence[seg[1]].append(i)
+    used = [False] * len(segments)
+    loops = []
+    for start in range(len(segments)):
+        if used[start]:
+            continue
+        used[start] = True
+        va, vb, pa, pb = segments[start]
+        loop = [pa, pb]
+        start_v = va
+        current_v = vb
+        while current_v != start_v:
+            nxt = None
+            for s_idx in incidence[current_v]:
+                if not used[s_idx]:
+                    nxt = s_idx
+                    break
+            if nxt is None:
+                break
+            used[nxt] = True
+            sva, svb, spa, spb = segments[nxt]
+            if sva == current_v:
+                next_v, next_p = svb, spb
+            else:
+                next_v, next_p = sva, spa
+            if next_v == start_v:
+                break
+            loop.append(next_p)
+            current_v = next_v
+        loops.append(loop)
+    return loops
+
+
 def find_camera(scene):
     if scene.camera is not None:
         return scene.camera
@@ -155,7 +220,11 @@ def main():
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     cam_loc = camera.matrix_world.translation
-    lights = get_viewport_lights(camera) if shading_mode == "lambert" else []
+    if shading_mode == "lambert":
+        sun_lights = get_sun_lights(scene)
+        lights = sun_lights if sun_lights else get_viewport_lights(camera)
+    else:
+        lights = []
 
     mesh_groups = []
 
@@ -191,23 +260,27 @@ def main():
                 ei = mesh.loops[li].edge_index
                 edge_to_polys[ei].append(p.index)
 
-        polys_out = []
-        edges_out = []
+        poly_visible = [False] * len(mesh.polygons)
+        poly_depth = [0.0] * len(mesh.polygons)
         for poly in mesh.polygons:
             if not poly_is_front[poly.index]:
                 continue
-            verts_idx = poly.vertices
-            if any(screen_verts[i][2] <= 0.0 for i in verts_idx):
+            if any(screen_verts[i][2] <= 0.0 for i in poly.vertices):
                 continue
+            poly_visible[poly.index] = True
+            poly_depth[poly.index] = (
+                sum(screen_verts[i][2] for i in poly.vertices) / poly.loop_total
+            )
 
-            n_loops = poly.loop_total
-            points = [(screen_verts[i][0], screen_verts[i][1]) for i in verts_idx]
-
-            kept_edges = []
+        edge_kept = {}
+        for poly in mesh.polygons:
+            if not poly_visible[poly.index]:
+                continue
             n1 = poly_normal_world[poly.index]
-            for k in range(n_loops):
-                loop_index = poly.loop_start + k
-                edge_index = mesh.loops[loop_index].edge_index
+            for li in range(poly.loop_start, poly.loop_start + poly.loop_total):
+                edge_index = mesh.loops[li].edge_index
+                if (poly.index, edge_index) in edge_kept:
+                    continue
                 neighbors = [n for n in edge_to_polys[edge_index] if n != poly.index]
                 draw = False
                 if not neighbors:
@@ -217,27 +290,130 @@ def main():
                 else:
                     for nb in neighbors:
                         d = max(-1.0, min(1.0, n1.dot(poly_normal_world[nb])))
-                        angle = math.acos(d)
-                        if angle >= crease_threshold:
+                        if math.acos(d) >= crease_threshold:
                             draw = True
                             break
-                if draw:
-                    kept_edges.append((points[k], points[(k + 1) % n_loops]))
+                edge_kept[(poly.index, edge_index)] = draw
 
-            depth = sum(screen_verts[i][2] for i in verts_idx) / len(verts_idx)
-            base = material_base_color(eval_obj, poly)
-            color = shade_lambert(n1, base, lights) if shading_mode == "lambert" else base
-            fill = rgb_to_hex(color)
-            all_edges_kept = len(kept_edges) == n_loops
-            polys_out.append((depth, points, fill, all_edges_kept))
-            if not all_edges_kept:
-                edges_out.extend(kept_edges)
+        polys_out = []
+        paths_out = []
+        edges_out = []
+
+        if shading_mode == "flat":
+            parent = list(range(len(mesh.polygons)))
+
+            def find(x):
+                r = x
+                while parent[r] != r:
+                    r = parent[r]
+                while parent[x] != r:
+                    parent[x], x = r, parent[x]
+                return r
+
+            for poly in mesh.polygons:
+                if not poly_visible[poly.index]:
+                    continue
+                mat_idx = poly.material_index
+                for li in range(poly.loop_start, poly.loop_start + poly.loop_total):
+                    edge_index = mesh.loops[li].edge_index
+                    if edge_kept[(poly.index, edge_index)]:
+                        continue
+                    for other in edge_to_polys[edge_index]:
+                        if other == poly.index or not poly_visible[other]:
+                            continue
+                        if mesh.polygons[other].material_index != mat_idx:
+                            continue
+                        ra, rb = find(poly.index), find(other)
+                        if ra != rb:
+                            parent[ra] = rb
+
+            components = defaultdict(list)
+            for pi in range(len(mesh.polygons)):
+                if poly_visible[pi]:
+                    components[find(pi)].append(pi)
+
+            for poly_indices in components.values():
+                first = mesh.polygons[poly_indices[0]]
+                base = material_base_color(eval_obj, first)
+                fill = rgb_to_hex(base)
+                depth = sum(poly_depth[pi] for pi in poly_indices) / len(poly_indices)
+
+                if len(poly_indices) == 1:
+                    pi = poly_indices[0]
+                    poly = mesh.polygons[pi]
+                    n_loops = poly.loop_total
+                    points = [(screen_verts[v][0], screen_verts[v][1]) for v in poly.vertices]
+                    kept = []
+                    for k in range(n_loops):
+                        li = poly.loop_start + k
+                        ei = mesh.loops[li].edge_index
+                        if edge_kept[(pi, ei)]:
+                            kept.append((points[k], points[(k + 1) % n_loops]))
+                    all_kept = len(kept) == n_loops
+                    polys_out.append((depth, points, fill, all_kept))
+                    if not all_kept:
+                        edges_out.extend(kept)
+                    continue
+
+                segments = []
+                seen = set()
+                for pi in poly_indices:
+                    poly = mesh.polygons[pi]
+                    n_loops = poly.loop_total
+                    for k in range(n_loops):
+                        li = poly.loop_start + k
+                        ei = mesh.loops[li].edge_index
+                        if not edge_kept[(pi, ei)]:
+                            continue
+                        va = poly.vertices[k]
+                        vb = poly.vertices[(k + 1) % n_loops]
+                        key = (min(va, vb), max(va, vb))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        pa = (screen_verts[va][0], screen_verts[va][1])
+                        pb = (screen_verts[vb][0], screen_verts[vb][1])
+                        segments.append((va, vb, pa, pb))
+
+                loops = chain_segments(segments)
+                if not loops:
+                    continue
+                d_parts = []
+                for loop in loops:
+                    if not loop:
+                        continue
+                    d_parts.append(f"M{loop[0][0]:.2f},{loop[0][1]:.2f}")
+                    for pt in loop[1:]:
+                        d_parts.append(f"L{pt[0]:.2f},{pt[1]:.2f}")
+                    d_parts.append("Z")
+                paths_out.append((depth, " ".join(d_parts), fill))
+        else:
+            for poly in mesh.polygons:
+                if not poly_visible[poly.index]:
+                    continue
+                n_loops = poly.loop_total
+                points = [(screen_verts[v][0], screen_verts[v][1]) for v in poly.vertices]
+                kept = []
+                for k in range(n_loops):
+                    li = poly.loop_start + k
+                    ei = mesh.loops[li].edge_index
+                    if edge_kept[(poly.index, ei)]:
+                        kept.append((points[k], points[(k + 1) % n_loops]))
+                n1 = poly_normal_world[poly.index]
+                base = material_base_color(eval_obj, poly)
+                color = shade_lambert(n1, base, lights)
+                fill = rgb_to_hex(color)
+                all_kept = len(kept) == n_loops
+                polys_out.append((poly_depth[poly.index], points, fill, all_kept))
+                if not all_kept:
+                    edges_out.extend(kept)
 
         eval_obj.to_mesh_clear()
 
-        if polys_out:
-            mesh_depth = sum(p[0] for p in polys_out) / len(polys_out)
-            mesh_groups.append((mesh_depth, polys_out, edges_out))
+        if polys_out or paths_out:
+            depths = [p[0] for p in polys_out] + [p[0] for p in paths_out]
+            mesh_depth = sum(depths) / len(depths)
+            mesh_groups.append((mesh_depth, polys_out, paths_out, edges_out))
 
     mesh_groups.sort(key=lambda g: -g[0])
 
@@ -247,18 +423,29 @@ def main():
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
     ]
     sw = f"{stroke_width:g}"
-    for _, polys_out, edges_out in mesh_groups:
-        for _, points, fill, all_edges_kept in sorted(polys_out, key=lambda p: -p[0]):
-            pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-            if all_edges_kept:
-                parts.append(
-                    f'<polygon points="{pts}" fill="{fill}" stroke="#000000" '
-                    f'stroke-width="{sw}" stroke-linejoin="round"/>'
-                )
+    for _, polys_out, paths_out, edges_out in mesh_groups:
+        shapes = (
+            [("poly", d, pts, fill, ak) for d, pts, fill, ak in polys_out]
+            + [("path", d, dpath, fill, None) for d, dpath, fill in paths_out]
+        )
+        for kind, _, payload, fill, all_edges_kept in sorted(shapes, key=lambda s: -s[1]):
+            if kind == "poly":
+                pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in payload)
+                if all_edges_kept:
+                    parts.append(
+                        f'<polygon points="{pts}" fill="{fill}" stroke="#000000" '
+                        f'stroke-width="{sw}" stroke-linejoin="round"/>'
+                    )
+                else:
+                    parts.append(
+                        f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
+                        f'stroke-width="0.6" stroke-linejoin="round"/>'
+                    )
             else:
                 parts.append(
-                    f'<polygon points="{pts}" fill="{fill}" stroke="{fill}" '
-                    f'stroke-width="0.6" stroke-linejoin="round"/>'
+                    f'<path d="{payload}" fill="{fill}" fill-rule="evenodd" '
+                    f'stroke="#000000" stroke-width="{sw}" '
+                    f'stroke-linejoin="round" stroke-linecap="round"/>'
                 )
         for (x1, y1), (x2, y2) in edges_out:
             parts.append(
