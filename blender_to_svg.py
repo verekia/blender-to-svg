@@ -28,6 +28,11 @@ def parse_args():
                         help="Shading mode: 'lambert' (default) shades faces using "
                              "viewport solid lights; 'flat' uses the raw material "
                              "color with no shading.")
+    parser.add_argument("-n", "--no-outlines", action="store_true",
+                        help="Suppress all outlines: no black contour stroke on "
+                             "polygons and no interior crease/silhouette lines. "
+                             "Polygons still get a same-colour seam-mask stroke "
+                             "to hide anti-aliasing gaps between adjacent fills.")
     return parser.parse_args(argv)
 
 
@@ -369,6 +374,7 @@ def main():
     stroke_width = args.stroke_width
     crease_threshold = math.radians(args.crease_angle)
     shading_mode = args.shading
+    no_outlines = args.no_outlines
 
     scene = bpy.context.scene
     camera = find_camera(scene)
@@ -625,7 +631,7 @@ def main():
                 if len(cleaned) < 3:
                     continue
                 pts = " ".join(f"{x:.2f},{y:.2f}" for x, y in cleaned)
-                if flag:  # all_edges_kept
+                if flag and not no_outlines:  # all_edges_kept
                     parts.append(
                         f'<polygon points="{pts}" fill="{fill}" stroke="#000000" '
                         f'stroke-width="{sw}" stroke-linejoin="round"/>'
@@ -653,11 +659,12 @@ def main():
                         f'stroke="{fill}" stroke-width="0.6" '
                         f'stroke-linejoin="round"/>'
                     )
-        for (x1, y1), (x2, y2) in edges_out:
-            parts.append(
-                f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-                f'stroke="#000000" stroke-width="{sw}" stroke-linecap="round"/>'
-            )
+        if not no_outlines:
+            for (x1, y1), (x2, y2) in edges_out:
+                parts.append(
+                    f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
+                    f'stroke="#000000" stroke-width="{sw}" stroke-linecap="round"/>'
+                )
     parts.append('</svg>')
 
     if output_path is None:

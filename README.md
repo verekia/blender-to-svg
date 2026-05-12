@@ -48,6 +48,7 @@ blender -b file.blend --python blender_to_svg.py -- [output.svg] [flags...]
 ./blender_to_svg.sh scene.blend -c 180                # outline only, no internal lines
 ./blender_to_svg.sh scene.blend -s flat               # raw material colours, no shading
 ./blender_to_svg.sh scene.blend -s flat -c 30 -w 0.5  # merged same-colour regions
+./blender_to_svg.sh scene.blend -n                    # no outlines at all (fills only)
 ```
 
 ### Flags
@@ -57,6 +58,7 @@ blender -b file.blend --python blender_to_svg.py -- [output.svg] [flags...]
 | `-w, --stroke-width FLOAT`      | `1.0`       | Outline thickness in SVG user units.                                                                              |
 | `-c, --crease-angle DEGREES`    | `0`         | Minimum dihedral angle for an *interior* edge to be drawn. `0` = every edge; `180` = silhouette only; `30` keeps cube/wedge corners but skips smooth surfaces like a sphere's quads. |
 | `-s, --shading {lambert,flat}`  | `lambert`   | `lambert` shades each face with `Σ base × light_colour × max(0, n·d)`; `flat` uses the raw material colour with no shading. |
+| `-n, --no-outlines`             | off         | Suppress all outlines: no black contour stroke and no interior crease/silhouette lines. Polygons keep an invisible same-colour seam-mask stroke to hide anti-aliasing gaps between adjacent fills. |
 
 Silhouette edges (a face whose neighbour is back-facing or absent) and open
 mesh-boundary edges are *always* drawn, regardless of `--crease-angle`.
